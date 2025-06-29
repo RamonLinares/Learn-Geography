@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>World Geography Game</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; color: #0f0; font-family: monospace; }
+        canvas { display: block; cursor: grab; }
+        canvas:active { cursor: grabbing; }
+        .ui-panel {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 90%;
+            max-width: 500px;
+            padding: 20px;
+            background-color: rgba(0, 0, 0, 0.8);
+            border: 1px solid #0f0;
+            border-radius: 8px;
+            text-align: center;
+            z-index: 100;
+        }
+        #game-ui {
+            top: 10px;
+            left: 10px;
+            right: 10px;
+            transform: none;
+            width: auto;
+            max-width: none;
+            display: none; /* Initially hidden */
+        }
+        #main-menu h1 {
+            margin-top: 0;
+            color: #0f0;
+        }
+        #main-menu button, #continent-menu button {
+            display: block;
+            width: 100%;
+            padding: 15px;
+            margin-bottom: 10px;
+            background-color: #222;
+            border: 1px solid #0f0;
+            color: #0f0;
+            cursor: pointer;
+            border-radius: 4px;
+            font-size: 1.2em;
+        }
+        #main-menu button:hover, #continent-menu button:hover {
+            background-color: #333;
+        }
+        .hidden { display: none !important; }
+
+        #game-stats {
+            display: flex;
+            justify-content: space-around;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+        #game-ui h2 { margin: 0 0 10px 0; font-size: 1.2em; }
+        #game-ui button {
+            background-color: #222;
+            border: 1px solid #0f0;
+            color: #0f0;
+            padding: 8px 12px;
+            cursor: pointer;
+            border-radius: 4px;
+            margin: 0 5px;
+        }
+        #game-ui button:hover { background-color: #333; }
+        #game-ui button:disabled {
+            background-color: #111;
+            color: #555;
+            border-color: #555;
+            cursor: not-allowed;
+        }
+        #feedback-message { margin-top: 10px; min-height: 1.2em; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <!-- Main Menu -->
+    <div id="main-menu" class="ui-panel">
+        <h1>Geography Game</h1>
+        <button data-mode="classic">Classic Mode</button>
+        <button data-mode="timeAttack">Time Attack</button>
+        <button data-mode="continentChallenge">Continent Challenge</button>
+        <button data-mode="capitals">Capital Cities</button>
+    </div>
+
+    <!-- Continent Selection Menu -->
+    <div id="continent-menu" class="ui-panel hidden">
+        <h1>Select a Continent</h1>
+        <button data-continent="Africa">Africa</button>
+        <button data-continent="Asia">Asia</button>
+        <button data-continent="Europe">Europe</button>
+        <button data-continent="North America">North America</button>
+        <button data-continent="South America">South America</button>
+        <button data-continent="Oceania">Oceania</button>
+        <button data-action="back">Back to Main Menu</button>
+    </div>
+
+    <!-- Game UI Elements -->
+    <div id="game-ui" class="ui-panel">
+        <div id="game-stats">
+            <!-- Stats will be populated by JS -->
+        </div>
+        <h2 id="prompt-container">Find this country: <span id="country-prompt">Loading...</span></h2>
+        <div id="controls-container">
+            <!-- Controls will be populated by JS -->
+        </div>
+        <p id="feedback-message"></p>
+    </div>
+
+    <!-- Add Three.js, D3.js, and TopoJSON libraries -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://d3js.org/topojson.v3.min.js"></script>
+    <script>
+        // --- Game and Scene Setup ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+        camera.position.z = 4;
+
+        const earthGroup = new THREE.Group();
+        scene.add(earthGroup);
+
+        const sphereGeometry = new THREE.SphereGeometry(2, 64, 64);
+
+        const wireframeMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true, transparent: true, opacity: 0.1 });
+        const wireframeSphere = new THREE.Mesh(sphereGeometry, wireframeMaterial);
+        earthGroup.add(wireframeSphere);
+
+        // --- Starry Background ---
+        const starVertices = [];
+        for (let i = 0; i < 10000; i++) {
+            const x = THREE.MathUtils.randFloatSpread(200);
+            const y = THREE.MathUtils.randFloatSpread(200);
+            const z = THREE.MathUtils.randFloatSpread(200);
+            starVertices.push(x, y, z);
+        }
+        const starGeometry = new THREE.BufferGeometry();
+        starGeometry.setAttribute('position', new THREE.Float32BufferAttribute(starVertices, 3));
+        const starMaterial = new THREE.PointsMaterial({ color: 0x888888, size: 0.05 });
+        const stars = new THREE.Points(starGeometry, starMaterial);
+        scene.add(stars);
+
+        // --- Game Logic Variables ---
+        let allCountriesData = [];
+        let currentChallengeCountries = [];
+        let targetCountry = null;
+        const colorToCountryMap = new Map();
+        let continentsMaterial; 
+        let targetRotation = { x: null, y: null };
+        let isCentering = false;
+        let score = 0;
+        let streak = 0;
+        let lives = 5;
+        let timeLeft = 0;
+        let gameTimer = null;
+        let currentGameMode = null;
+        let gameIsOver = false;
+        let answerWasShown = false;
+        let pulseInterval = null;
+        
+        // --- Data for new modes ---
+        // **FIX:** Embedded country metadata directly to avoid network errors.
+        const countryMetadata = [
+            { name: "Afghanistan", capital: "Kabul", continent: "Asia" }, { name: "Angola", capital: "Luanda", continent: "Africa" },
+            { name: "Albania", capital: "Tirana", continent: "Europe" }, { name: "United Arab Emirates", capital: "Abu Dhabi", continent: "Asia" },
+            { name: "Argentina", capital: "Buenos Aires", continent: "South America" }, { name: "Armenia", capital: "Yerevan", continent: "Asia" },
+            { name: "Australia", capital: "Canberra", continent: "Oceania" }, { name: "Austria", capital: "Vienna", continent: "Europe" },
+            { name: "Azerbaijan", capital: "Baku", continent: "Asia" }, { name: "Burundi", capital: "Bujumbura", continent: "Africa" },
+            { name: "Belgium", capital: "Brussels", continent: "Europe" }, { name: "Benin", capital: "Porto-Novo", continent: "Africa" },
+            { name: "Burkina Faso", capital: "Ouagadougou", continent: "Africa" }, { name: "Bangladesh", capital: "Dhaka", continent: "Asia" },
+            { name: "Bulgaria", capital: "Sofia", continent: "Europe" }, { name: "Bahamas", capital: "Nassau", continent: "North America" },
+            { name: "Bosnia and Herzegovina", capital: "Sarajevo", continent: "Europe" }, { name: "Belarus", capital: "Minsk", continent: "Europe" },
+            { name: "Belize", capital: "Belmopan", continent: "North America" }, { name: "Bolivia", capital: "Sucre", continent: "South America" },
+            { name: "Brazil", capital: "Brasília", continent: "South America" }, { name: "Brunei", capital: "Bandar Seri Begawan", continent: "Asia" },
+            { name: "Bhutan", capital: "Thimphu", continent: "Asia" }, { name: "Botswana", capital: "Gaborone", continent: "Africa" },
+            { name: "Central African Republic", capital: "Bangui", continent: "Africa" }, { name: "Canada", capital: "Ottawa", continent: "North America" },
+            { name: "Switzerland", capital: "Bern", continent: "Europe" }, { name: "Chile", capital: "Santiago", continent: "South America" },
+            { name: "China", capital: "Beijing", continent: "Asia" }, { name: "Ivory Coast", capital: "Yamoussoukro", continent: "Africa" },
+            { name: "Cameroon", capital: "Yaoundé", continent: "Africa" }, { name: "Democratic Republic of the Congo", capital: "Kinshasa", continent: "Africa" },
+            { name: "Republic of the Congo", capital: "Brazzaville", continent: "Africa" }, { name: "Colombia", capital: "Bogotá", continent: "South America" },
+            { name: "Costa Rica", capital: "San José", continent: "North America" }, { name: "Cuba", capital: "Havana", continent: "North America" },
+            { name: "Cyprus", capital: "Nicosia", continent: "Europe" }, { name: "Czechia", capital: "Prague", continent: "Europe" },
+            { name: "Germany", capital: "Berlin", continent: "Europe" }, { name: "Djibouti", capital: "Djibouti", continent: "Africa" },
+            { name: "Denmark", capital: "Copenhagen", continent: "Europe" }, { name: "Dominican Republic", capital: "Santo Domingo", continent: "North America" },
+            { name: "Algeria", capital: "Algiers", continent: "Africa" }, { name: "Ecuador", capital: "Quito", continent: "South America" },
+            { name: "Egypt", capital: "Cairo", continent: "Africa" }, { name: "Eritrea", capital: "Asmara", continent: "Africa" },
+            { name: "Spain", capital: "Madrid", continent: "Europe" }, { name: "Estonia", capital: "Tallinn", continent: "Europe" },
+            { name: "Ethiopia", capital: "Addis Ababa", continent: "Africa" }, { name: "Finland", capital: "Helsinki", continent: "Europe" },
+            { name: "Fiji", capital: "Suva", continent: "Oceania" }, { name: "France", capital: "Paris", continent: "Europe" },
+            { name: "Gabon", capital: "Libreville", continent: "Africa" }, { name: "United Kingdom", capital: "London", continent: "Europe" },
+            { name: "Georgia", capital: "Tbilisi", continent: "Asia" }, { name: "Ghana", capital: "Accra", continent: "Africa" },
+            { name: "Guinea", capital: "Conakry", continent: "Africa" }, { name: "Gambia", capital: "Banjul", continent: "Africa" },
+            { name: "Guinea-Bissau", capital: "Bissau", continent: "Africa" }, { name: "Equatorial Guinea", capital: "Malabo", continent: "Africa" },
+            { name: "Greece", capital: "Athens", continent: "Europe" }, { name: "Guatemala", capital: "Guatemala City", continent: "North America" },
+            { name: "Guyana", capital: "Georgetown", continent: "South America" }, { name: "Honduras", capital: "Tegucigalpa", continent: "North America" },
+            { name: "Croatia", capital: "Zagreb", continent: "Europe" }, { name: "Haiti", capital: "Port-au-Prince", continent: "North America" },
+            { name: "Hungary", capital: "Budapest", continent: "Europe" }, { name: "Indonesia", capital: "Jakarta", continent: "Asia" },
+            { name: "India", capital: "New Delhi", continent: "Asia" }, { name: "Ireland", capital: "Dublin", continent: "Europe" },
+            { name: "Iran", capital: "Tehran", continent: "Asia" }, { name: "Iraq", capital: "Baghdad", continent: "Asia" },
+            { name: "Iceland", capital: "Reykjavik", continent: "Europe" }, { name: "Israel", capital: "Jerusalem", continent: "Asia" },
+            { name: "Italy", capital: "Rome", continent: "Europe" }, { name: "Jamaica", capital: "Kingston", continent: "North America" },
+            { name: "Jordan", capital: "Amman", continent: "Asia" }, { name: "Japan", capital: "Tokyo", continent: "Asia" },
+            { name: "Kazakhstan", capital: "Nur-Sultan", continent: "Asia" }, { name: "Kenya", capital: "Nairobi", continent: "Africa" },
+            { name: "Kyrgyzstan", capital: "Bishkek", continent: "Asia" }, { name: "Cambodia", capital: "Phnom Penh", continent: "Asia" },
+            { name: "South Korea", capital: "Seoul", continent: "Asia" }, { name: "Kuwait", capital: "Kuwait City", continent: "Asia" },
+            { name: "Laos", capital: "Vientiane", continent: "Asia" }, { name: "Lebanon", capital: "Beirut", continent: "Asia" },
+            { name: "Liberia", capital: "Monrovia", continent: "Africa" }, { name: "Libya", capital: "Tripoli", continent: "Africa" },
+            { name: "Sri Lanka", capital: "Sri Jayawardenepura Kotte", continent: "Asia" }, { name: "Lesotho", capital: "Maseru", continent: "Africa" },
+            { name: "Lithuania", capital: "Vilnius", continent: "Europe" }, { name: "Luxembourg", capital: "Luxembourg", continent: "Europe" },
+            { name: "Latvia", capital: "Riga", continent: "Europe" }, { name: "Morocco", capital: "Rabat", continent: "Africa" },
+            { name: "Moldova", capital: "Chișinău", continent: "Europe" }, { name: "Madagascar", capital: "Antananarivo", continent: "Africa" },
+            { name: "Mexico", capital: "Mexico City", continent: "North America" }, { name: "Macedonia", capital: "Skopje", continent: "Europe" },
+            { name: "Mali", capital: "Bamako", continent: "Africa" }, { name: "Myanmar", capital: "Naypyidaw", continent: "Asia" },
+            { name: "Montenegro", capital: "Podgorica", continent: "Europe" }, { name: "Mongolia", capital: "Ulaanbaatar", continent: "Asia" },
+            { name: "Mozambique", capital: "Maputo", continent: "Africa" }, { name: "Mauritania", capital: "Nouakchott", continent: "Africa" },
+            { name: "Malawi", capital: "Lilongwe", continent: "Africa" }, { name: "Malaysia", capital: "Kuala Lumpur", continent: "Asia" },
+            { name: "Namibia", capital: "Windhoek", continent: "Africa" }, { name: "Niger", capital: "Niamey", continent: "Africa" },
+            { name: "Nigeria", capital: "Abuja", continent: "Africa" }, { name: "Nicaragua", capital: "Managua", continent: "North America" },
+            { name: "Netherlands", capital: "Amsterdam", continent: "Europe" }, { name: "Norway", capital: "Oslo", continent: "Europe" },
+            { name: "Nepal", capital: "Kathmandu", continent: "Asia" }, { name: "New Zealand", capital: "Wellington", continent: "Oceania" },
+            { name: "Oman", capital: "Muscat", continent: "Asia" }, { name: "Pakistan", capital: "Islamabad", continent: "Asia" },
+            { name: "Panama", capital: "Panama City", continent: "North America" }, { name: "Peru", capital: "Lima", continent: "South America" },
+            { name: "Philippines", capital: "Manila", continent: "Asia" }, { name: "Papua New Guinea", capital: "Port Moresby", continent: "Oceania" },
+            { name: "Poland", capital: "Warsaw", continent: "Europe" }, { name: "North Korea", capital: "Pyongyang", continent: "Asia" },
+            { name: "Portugal", capital: "Lisbon", continent: "Europe" }, { name: "Paraguay", capital: "Asunción", continent: "South America" },
+            { name: "Qatar", capital: "Doha", continent: "Asia" }, { name: "Romania", capital: "Bucharest", continent: "Europe" },
+            { name: "Russia", capital: "Moscow", continent: "Europe" }, { name: "Rwanda", capital: "Kigali", continent: "Africa" },
+            { name: "Western Sahara", capital: "El Aaiún", continent: "Africa" }, { name: "Saudi Arabia", capital: "Riyadh", continent: "Asia" },
+            { name: "Sudan", capital: "Khartoum", continent: "Africa" }, { name: "South Sudan", capital: "Juba", continent: "Africa" },
+            { name: "Senegal", capital: "Dakar", continent: "Africa" }, { name: "Sierra Leone", capital: "Freetown", continent: "Africa" },
+            { name: "El Salvador", capital: "San Salvador", continent: "North America" }, { name: "Somalia", capital: "Mogadishu", continent: "Africa" },
+            { name: "Serbia", capital: "Belgrade", continent: "Europe" }, { name: "Suriname", capital: "Paramaribo", continent: "South America" },
+            { name: "Slovakia", capital: "Bratislava", continent: "Europe" }, { name: "Slovenia", capital: "Ljubljana", continent: "Europe" },
+            { name: "Sweden", capital: "Stockholm", continent: "Europe" }, { name: "Swaziland", capital: "Mbabane", continent: "Africa" },
+            { name: "Syria", capital: "Damascus", continent: "Asia" }, { name: "Chad", capital: "N'Djamena", continent: "Africa" },
+            { name: "Togo", capital: "Lomé", continent: "Africa" }, { name: "Thailand", capital: "Bangkok", continent: "Asia" },
+            { name: "Tajikistan", capital: "Dushanbe", continent: "Asia" }, { name: "Turkmenistan", capital: "Ashgabat", continent: "Asia" },
+            { name: "Timor-Leste", capital: "Dili", continent: "Asia" }, { name: "Trinidad and Tobago", capital: "Port of Spain", continent: "North America" },
+            { name: "Tunisia", capital: "Tunis", continent: "Africa" }, { name: "Turkey", capital: "Ankara", continent: "Asia" },
+            { name: "Tanzania", capital: "Dodoma", continent: "Africa" }, { name: "Uganda", capital: "Kampala", continent: "Africa" },
+            { name: "Ukraine", capital: "Kyiv", continent: "Europe" }, { name: "Uruguay", capital: "Montevideo", continent: "South America" },
+            { name: "United States of America", capital: "Washington, D.C.", continent: "North America" }, { name: "Uzbekistan", capital: "Tashkent", continent: "Asia" },
+            { name: "Venezuela", capital: "Caracas", continent: "South America" }, { name: "Vietnam", capital: "Hanoi", continent: "Asia" },
+            { name: "Vanuatu", capital: "Port Vila", continent: "Oceania" }, { name: "Yemen", capital: "Sana'a", continent: "Asia" },
+            { name: "South Africa", capital: "Pretoria", continent: "Africa" }, { name: "Zambia", capital: "Lusaka", continent: "Africa" },
+            { name: "Zimbabwe", capital: "Harare", continent: "Africa" }, { name: "Somaliland", capital: "Hargeisa", continent: "Africa" },
+            { name: "Taiwan", capital: "Taipei", continent: "Asia" }, { name: "Kosovo", capital: "Pristina", continent: "Europe" }
+        ];
+
+        // --- UI Elements ---
+        const mainMenu = document.getElementById('main-menu');
+        const continentMenu = document.getElementById('continent-menu');
+        const gameUI = document.getElementById('game-ui');
+        const gameStatsUI = document.getElementById('game-stats');
+        const promptContainerUI = document.getElementById('prompt-container');
+        const controlsContainerUI = document.getElementById('controls-container');
+        const feedbackMessageUI = document.getElementById('feedback-message');
+        
+        // --- Canvases for Textures ---
+        const visibleCanvas = document.createElement('canvas');
+        const visibleContext = visibleCanvas.getContext('2d', { willReadFrequently: true });
+        const pickingCanvas = document.createElement('canvas');
+        const pickingContext = pickingCanvas.getContext('2d', { willReadFrequently: true });
+
+        const canvasWidth = 2048;
+        const canvasHeight = 1024;
+        visibleCanvas.width = pickingCanvas.width = canvasWidth;
+        visibleCanvas.height = pickingCanvas.height = canvasHeight;
+
+        // --- D3 Setup ---
+        const projection = d3.geoEquirectangular().fitSize([canvasWidth, canvasHeight], { type: "Sphere" });
+        const pathGenerator = d3.geoPath(projection);
+
+        // --- Drawing and Highlighting Function ---
+        function drawCountries(highlightCountry = null, pulseFactor = null) {
+            visibleContext.clearRect(0, 0, canvasWidth, canvasHeight);
+            visibleContext.strokeStyle = '#000';
+            visibleContext.lineWidth = 0.5;
+
+            allCountriesData.forEach(country => {
+                const isHighlighted = highlightCountry && country.properties.name === highlightCountry.properties.name;
+                
+                if (isHighlighted) {
+                    if (pulseFactor !== null) {
+                        const pulseColor = new THREE.Color(0xffff00).lerp(new THREE.Color(0xffffff), pulseFactor);
+                        visibleContext.fillStyle = `#${pulseColor.getHexString()}`;
+                    } else {
+                         visibleContext.fillStyle = '#ffff00';
+                    }
+                } else {
+                     visibleContext.fillStyle = '#00ff00';
+                }
+                
+                pathGenerator.context(visibleContext);
+                visibleContext.beginPath();
+                pathGenerator(country);
+                visibleContext.fill();
+                visibleContext.stroke();
+            });
+
+            if (continentsMaterial) {
+                continentsMaterial.map.needsUpdate = true;
+            }
+        }
+
+        // --- Game Mode Setup & Teardown ---
+        function setupGameUI(mode) {
+             let statsHTML = '';
+             let controlsHTML = '<button id="main-menu-btn">Main Menu</button>';
+
+             switch (mode) {
+                case 'classic':
+                    statsHTML = `<span>Score: <span id="score">0</span></span><span>Streak: <span id="streak">0</span></span><span>Lives: <span id="lives">5</span></span>`;
+                    controlsHTML += `<button id="skip-country-btn">Skip Country</button><button id="show-answer-btn">Show Answer</button>`;
+                    break;
+                case 'timeAttack':
+                    statsHTML = `<span>Score: <span id="score">0</span></span><span>Time Left: <span id="time-left">120</span></span>`;
+                    // No extra controls in time attack
+                    break;
+                 case 'continentChallenge':
+                    statsHTML = `<span>Found: <span id="found-count">0</span> / <span id="total-count">0</span></span><span>Continent: <span id="continent-name"></span></span>`;
+                    controlsHTML += `<button id="show-answer-btn">Show Answer</button>`;
+                     break;
+                case 'capitals':
+                     statsHTML = `<span>Score: <span id="score">0</span></span><span>Streak: <span id="streak">0</span></span><span>Lives: <span id="lives">5</span></span>`;
+                     controlsHTML += `<button id="skip-country-btn">Skip Country</button><button id="show-answer-btn">Show Answer</button>`;
+                     break;
+             }
+             
+             gameStatsUI.innerHTML = statsHTML;
+             controlsContainerUI.innerHTML = controlsHTML;
+        }
+
+        function startGame(mode, options = {}) {
+            currentGameMode = mode;
+            gameIsOver = false;
+            answerWasShown = false;
+            score = 0;
+            streak = 0;
+            if(pulseInterval) clearInterval(pulseInterval);
+            if(gameTimer) clearInterval(gameTimer);
+            
+            mainMenu.classList.add('hidden');
+            continentMenu.classList.add('hidden');
+            gameUI.style.display = 'block';
+            
+            setupGameUI(mode);
+
+            switch (mode) {
+                case 'classic':
+                    lives = 5;
+                    updateStatsUI();
+                    promptContainerUI.innerHTML = `Find this country: <span id="country-prompt"></span>`;
+                    currentChallengeCountries = [...allCountriesData];
+                    selectNextCountry(false);
+                    break;
+                case 'timeAttack':
+                    timeLeft = 120;
+                    updateStatsUI();
+                    promptContainerUI.innerHTML = `Find this country: <span id="country-prompt"></span>`;
+                    currentChallengeCountries = [...allCountriesData];
+                    selectNextCountry(false);
+                    gameTimer = setInterval(() => {
+                        timeLeft--;
+                        updateStatsUI();
+                        if (timeLeft <= 0) {
+                            clearInterval(gameTimer);
+                            handleGameOver();
+                        }
+                    }, 1000);
+                    break;
+                case 'continentChallenge':
+                    currentChallengeCountries = allCountriesData.filter(c => c.properties.continent === options.continent);
+                    document.getElementById('total-count').textContent = currentChallengeCountries.length;
+                    document.getElementById('continent-name').textContent = options.continent;
+                    updateStatsUI();
+                    selectNextCountry(false);
+                    break;
+                case 'capitals':
+                    lives = 5;
+                    updateStatsUI();
+                    promptContainerUI.innerHTML = `Find the country with the capital: <span id="country-prompt"></span>`;
+                    currentChallengeCountries = allCountriesData.filter(c => c.properties.capital);
+                    selectNextCountry(false);
+                    break;
+            }
+             // Add event listeners for new buttons
+             if(document.getElementById('skip-country-btn')) document.getElementById('skip-country-btn').addEventListener('click', () => selectNextCountry(true));
+             if(document.getElementById('show-answer-btn')) document.getElementById('show-answer-btn').addEventListener('click', showAnswer);
+             document.getElementById('main-menu-btn').addEventListener('click', returnToMainMenu);
+        }
+
+        function returnToMainMenu() {
+            gameUI.style.display = 'none';
+            mainMenu.classList.remove('hidden');
+            if (gameTimer) clearInterval(gameTimer);
+            if (pulseInterval) clearInterval(pulseInterval);
+        }
+        
+        function updateStatsUI() {
+            if(document.getElementById('score')) document.getElementById('score').textContent = score;
+            if(document.getElementById('streak')) document.getElementById('streak').textContent = streak;
+            if(document.getElementById('lives')) document.getElementById('lives').textContent = lives;
+            if(document.getElementById('time-left')) document.getElementById('time-left').textContent = timeLeft;
+            if(document.getElementById('found-count')) document.getElementById('found-count').textContent = score / 10;
+        }
+
+        function handleGameOver() {
+            gameIsOver = true;
+            if (pulseInterval) clearInterval(pulseInterval);
+            let message = '';
+            switch(currentGameMode) {
+                case 'classic': case 'capitals': message = `Game Over! Final Score: ${score}`; break;
+                case 'timeAttack': message = `Time's Up! You found ${score / 10} countries.`; break;
+                case 'continentChallenge': message = `Continent Complete! Well done!`; break;
+            }
+            promptContainerUI.innerHTML = message;
+            controlsContainerUI.innerHTML = '<button id="play-again-btn">Main Menu</button>';
+            document.getElementById('play-again-btn').addEventListener('click', returnToMainMenu);
+        }
+
+        // --- Data Loading and Initialization ---
+        function initialize() {
+            fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json')
+                .then(response => response.json())
+                .then(data => {
+                    allCountriesData = topojson.feature(data, data.objects.countries).features.filter(d => d.properties.name !== "Antarctica");
+                    
+                    // A mapping for names that differ between datasets
+                    const nameMap = {
+                        "United States of America": "United States",
+                        "Republic of the Congo": "Congo, Republic of the",
+                        "Democratic Republic of the Congo": "Congo, the Democratic Republic of the",
+                        "Czechia": "Czech Republic",
+                        "Macedonia": "North Macedonia",
+                        "Swaziland": "Eswatini",
+                        "Timor-Leste": "East Timor"
+                    };
+
+                    // Link metadata to map data
+                    allCountriesData.forEach(c => {
+                        const lookupName = nameMap[c.properties.name] || c.properties.name;
+                        const meta = countryMetadata.find(m => m.name === lookupName);
+                        if (meta) {
+                            c.properties.continent = meta.continent;
+                            c.properties.capital = meta.capital;
+                        }
+                    });
+
+                    drawCountries();
+
+                    allCountriesData.forEach((country, i) => {
+                        const countryId = i + 1;
+                        const color = new THREE.Color(countryId);
+                        colorToCountryMap.set(color.getHex(), country.properties.name);
+                        
+                        pathGenerator.context(pickingContext);
+                        pickingContext.fillStyle = `#${color.getHexString()}`;
+                        pickingContext.beginPath();
+                        pathGenerator(country);
+                        pickingContext.fill();
+                    });
+
+                    const visibleTexture = new THREE.CanvasTexture(visibleCanvas);
+                    continentsMaterial = new THREE.MeshBasicMaterial({ map: visibleTexture, transparent: true });
+                    const continentsSphere = new THREE.Mesh(sphereGeometry.clone(), continentsMaterial);
+                    earthGroup.add(continentsSphere);
+                })
+                .catch(console.error);
+        }
+
+        initialize();
+
+
+        function selectNextCountry(isSkip = false) {
+            if (gameIsOver || currentChallengeCountries.length === 0) {
+                if (currentGameMode === 'continentChallenge' && !gameIsOver) handleGameOver();
+                return;
+            }
+            if (pulseInterval) clearInterval(pulseInterval);
+
+             if (isSkip && (currentGameMode === 'classic' || currentGameMode === 'capitals')) {
+                streak = 0;
+                lives--;
+                updateStatsUI();
+                feedbackMessageUI.textContent = `Skipped! You lost a life.`;
+                feedbackMessageUI.style.color = '#ff4136';
+                if (lives <= 0) {
+                    handleGameOver();
+                    return;
+                }
+            }
+            
+            answerWasShown = false;
+            if(document.getElementById('skip-country-btn')) document.getElementById('skip-country-btn').disabled = false;
+            if(document.getElementById('show-answer-btn')) document.getElementById('show-answer-btn').disabled = false;
+            
+            drawCountries();
+            isCentering = false;
+            targetRotation = { x: null, y: null };
+            const countryIndex = Math.floor(Math.random() * currentChallengeCountries.length);
+            targetCountry = currentChallengeCountries[countryIndex];
+
+            if(currentGameMode === 'continentChallenge') {
+                currentChallengeCountries.splice(countryIndex, 1);
+            }
+
+            if(currentGameMode === 'capitals') {
+                document.getElementById('country-prompt').textContent = targetCountry.properties.capital;
+            } else {
+                document.getElementById('country-prompt').textContent = targetCountry.properties.name;
+            }
+
+            if (!isSkip) {
+               feedbackMessageUI.textContent = '';
+            }
+        }
+
+        function showAnswer() {
+             if (!targetCountry || gameIsOver || answerWasShown) return;
+            
+            answerWasShown = true;
+            if (currentGameMode === 'classic' || currentGameMode === 'capitals') {
+                 lives--;
+                 streak = 0;
+            } else if (currentGameMode === 'continentChallenge') {
+                // No penalty for show answer in continent mode
+            }
+             
+             updateStatsUI();
+             feedbackMessageUI.textContent = `That was ${targetCountry.properties.name}.`;
+             feedbackMessageUI.style.color = '#ff4136';
+            
+            drawCountries(targetCountry);
+
+            const center = d3.geoCentroid(targetCountry);
+            const [lon, lat] = center;
+            targetRotation.y = -lon * (Math.PI / 180) - (Math.PI / 2);
+            targetRotation.x = lat * (Math.PI / 180);
+            isCentering = true;
+            
+            if(document.getElementById('show-answer-btn')) document.getElementById('show-answer-btn').disabled = true;
+            if(document.getElementById('skip-country-btn')) document.getElementById('skip-country-btn').disabled = true;
+
+            if (lives <= 0 && (currentGameMode === 'classic' || currentGameMode === 'capitals')) {
+                setTimeout(handleGameOver, 2000);
+            } else {
+                setTimeout(() => {
+                    selectNextCountry(false);
+                }, 2000);
+            }
+        }
+
+        // Raycasting for Country Picking
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        function pickCountry(event) {
+            if (answerWasShown || !targetCountry || gameIsOver) return;
+
+            const rect = renderer.domElement.getBoundingClientRect();
+            const xPos = event.clientX || event.changedTouches[0].clientX;
+            const yPos = event.clientY || event.changedTouches[0].clientY;
+
+            mouse.x = ((xPos - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((yPos - rect.top) / rect.height) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObject(earthGroup, true);
+            const continentsIntersect = intersects.find(i => i.object !== wireframeSphere);
+
+            if (continentsIntersect) {
+                const uv = continentsIntersect.uv;
+                const x = Math.floor(uv.x * pickingCanvas.width);
+                const y = Math.floor((1 - uv.y) * pickingCanvas.height);
+                
+                const pixelData = pickingContext.getImageData(x, y, 1, 1).data;
+                const pickedColor = new THREE.Color(pixelData[0] / 255, pixelData[1] / 255, pixelData[2] / 255);
+                const pickedHex = pickedColor.getHex();
+
+                if (colorToCountryMap.has(pickedHex)) {
+                    const clickedCountryName = colorToCountryMap.get(pickedHex);
+                    if (clickedCountryName === targetCountry.properties.name) {
+                        feedbackMessageUI.textContent = `Correct! That's ${clickedCountryName}.`;
+                        feedbackMessageUI.style.color = '#0f0';
+                        score += 10;
+                        if(currentGameMode !== 'continentChallenge') streak++;
+
+                        if (pulseInterval) clearInterval(pulseInterval);
+                        const pulseStartTime = Date.now();
+                        pulseInterval = setInterval(() => {
+                             const elapsed = (Date.now() - pulseStartTime) / 1000;
+                             const pulse = (Math.sin(elapsed * 6) + 1) / 2;
+                             drawCountries(targetCountry, pulse);
+                        }, 16);
+
+                        if(currentGameMode === 'continentChallenge' && currentChallengeCountries.length === 0) {
+                            setTimeout(handleGameOver, 2000);
+                        } else {
+                             setTimeout(() => {
+                               if (pulseInterval) clearInterval(pulseInterval);
+                               selectNextCountry(false)
+                            }, 2000);
+                        }
+                    } else {
+                        feedbackMessageUI.textContent = `Not quite! You clicked on ${clickedCountryName}.`;
+                        feedbackMessageUI.style.color = '#ff4136';
+                        if(currentGameMode !== 'continentChallenge') {
+                           streak = 0;
+                           lives--;
+                           if (lives <= 0) setTimeout(handleGameOver, 1500);
+                        }
+                    }
+                } else {
+                    feedbackMessageUI.textContent = 'You clicked on the ocean!';
+                    feedbackMessageUI.style.color = '#7FDBFF';
+                     if(currentGameMode !== 'continentChallenge') {
+                        streak = 0;
+                        lives--;
+                        if (lives <= 0) setTimeout(handleGameOver, 1500);
+                     }
+                }
+                updateStatsUI();
+            }
+        }
+        
+        // --- Animation and Controls ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            stars.rotation.x += 0.0001;
+            stars.rotation.y += 0.0001;
+
+            if (isCentering && targetRotation.y !== null) {
+                let deltaY = targetRotation.y - earthGroup.rotation.y;
+                let deltaX = targetRotation.x - earthGroup.rotation.x;
+
+                while (deltaY > Math.PI) deltaY -= (2 * Math.PI);
+                while (deltaY < -Math.PI) deltaY += (2 * Math.PI);
+
+                earthGroup.rotation.y += deltaY * 0.05;
+                earthGroup.rotation.x += deltaX * 0.05;
+
+                if (Math.abs(deltaY) < 0.005 && Math.abs(deltaX) < 0.005) {
+                    isCentering = false;
+                    earthGroup.rotation.y = targetRotation.y;
+                    earthGroup.rotation.x = targetRotation.x;
+                }
+            }
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // --- Event Listeners ---
+        mainMenu.addEventListener('click', (e) => {
+            if (e.target.tagName === 'BUTTON') {
+                const mode = e.target.dataset.mode;
+                if(mode === 'continentChallenge') {
+                    mainMenu.classList.add('hidden');
+                    continentMenu.classList.remove('hidden');
+                } else if(mode) {
+                    startGame(mode);
+                }
+            }
+        });
+
+         continentMenu.addEventListener('click', (e) => {
+            if (e.target.tagName === 'BUTTON') {
+                const continent = e.target.dataset.continent;
+                if (continent) {
+                   startGame('continentChallenge', { continent: continent });
+                } else if (e.target.dataset.action === 'back') {
+                    continentMenu.classList.add('hidden');
+                    mainMenu.classList.remove('hidden');
+                }
+            }
+        });
+
+        let isMouseDown = false;
+        let dragOccurred = false;
+        let previousMousePosition = { x: 0, y: 0 };
+        let mouseDownPosition = { x: 0, y: 0 };
+        const dragThreshold = 5;
+
+        function handleMouseDown(event) {
+            isMouseDown = true;
+            dragOccurred = false;
+            isCentering = false;
+            const x = event.clientX || event.touches[0].clientX;
+            const y = event.clientY || event.touches[0].clientY;
+            previousMousePosition = { x: x, y: y };
+            mouseDownPosition = { x: x, y: y };
+        }
+
+        function handleMouseMove(event) {
+            if (!isMouseDown) return;
+            
+            const x = event.clientX || event.touches[0].clientX;
+            const y = event.clientY || event.touches[0].clientY;
+
+            if (Math.abs(x - mouseDownPosition.x) > dragThreshold || Math.abs(y - mouseDownPosition.y) > dragThreshold) {
+                dragOccurred = true;
+            }
+
+            if(dragOccurred) {
+                const moveX = x - previousMousePosition.x;
+                const moveY = y - previousMousePosition.y;
+                earthGroup.rotation.y += moveX * 0.005;
+                earthGroup.rotation.x += moveY * 0.005;
+            }
+            previousMousePosition = { x: x, y: y };
+        }
+
+        function handleMouseUp(event) {
+            if (!dragOccurred) {
+                pickCountry(event);
+            }
+            isMouseDown = false;
+            dragOccurred = false;
+        }
+
+        renderer.domElement.addEventListener('mousedown', handleMouseDown);
+        renderer.domElement.addEventListener('mousemove', handleMouseMove);
+        renderer.domElement.addEventListener('mouseup', handleMouseUp);
+        renderer.domElement.addEventListener('mouseleave', () => { isMouseDown = false; });
+        renderer.domElement.addEventListener('touchstart', handleMouseDown, { passive: false });
+        renderer.domElement.addEventListener('touchmove', handleMouseMove, { passive: false });
+        renderer.domElement.addEventListener('touchend', handleMouseUp);
+
+        renderer.domElement.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            camera.position.z = Math.max(2.5, Math.min(8, camera.position.z + e.deltaY * 0.01));
+        });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }, false);
+    </script>
+</body>
+</html>
